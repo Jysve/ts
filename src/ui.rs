@@ -295,17 +295,29 @@ fn draw_calendar(frame: &mut Frame, app: &App, calendar: CalendarState) {
                 let date =
                     NaiveDate::from_ymd_opt(highlighted.year(), highlighted.month(), day as u32)
                         .expect("the calendar day is valid");
-                let mut style = Style::default();
-                if date == today {
-                    style = style.fg(Color::Cyan);
-                }
+                let has_todos = app
+                    .store
+                    .days
+                    .get(&date)
+                    .is_some_and(|todos| !todos.is_empty());
+                let mut style = Style::default().fg(if has_todos {
+                    Color::White
+                } else {
+                    Color::DarkGray
+                });
                 if date == app.selected_date {
-                    style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                    style = style.add_modifier(Modifier::BOLD);
                 }
                 if date == highlighted {
                     style = style
                         .fg(Color::Black)
                         .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD);
+                }
+                if date == today {
+                    style = style
+                        .fg(Color::Black)
+                        .bg(Color::Rgb(255, 165, 0))
                         .add_modifier(Modifier::BOLD);
                 }
                 cells.push(Span::styled(format!("{day:^4}"), style));

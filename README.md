@@ -1,6 +1,6 @@
 # ts
 
-`ts` is an interactive terminal todo application written in Rust. It organizes todos by date, sorts them by priority, and stores everything locally in a JSON file. The interface is built with [ratatui](https://github.com/ratatui/ratatui) and [crossterm](https://github.com/crossterm-rs/crossterm).
+`ts` is an interactive terminal todo application written in Rust. It organizes todos by date, sorts them by priority, and stores each day's todos locally in TOML. The interface is built with [ratatui](https://github.com/ratatui/ratatui) and [crossterm](https://github.com/crossterm-rs/crossterm).
 
 ## Features
 
@@ -8,7 +8,8 @@
 - High, medium, and low priorities, with priority-ordered lists
 - Completion toggles, title editing, and multiline details
 - Automatic persistence after every change
-- Atomic JSON writes and migration from the legacy data directory
+- Atomic per-day TOML writes and automatic migration from legacy JSON data
+- A non-interactive `ts --list` command for all incomplete todos
 - Unicode-aware title truncation and terminal cleanup on exit
 
 ## Requirements
@@ -55,6 +56,14 @@ cargo build --release --locked
 ```
 
 The application starts with today's date selected. Use `ts --help` for a compact command reference and `ts --version` to print the installed version.
+
+To list every incomplete todo directly in the terminal, sorted by date and then priority:
+
+```sh
+ts --list
+```
+
+Each line has the form `YYYY-MM-DD [Priority] Title`. Completed todos are omitted.
 
 ## Keyboard controls
 
@@ -106,22 +115,30 @@ The application starts with today's date selected. Use `ts --help` for a compact
 | `Enter` | Select the highlighted date |
 | `Esc` | Cancel |
 
+Dates without todos are gray, dates with todos are white, and today has an orange background. The highlighted date retains a contrasting selection background.
+
 ## Data storage
 
-Todos are saved after every change. The data file is selected in this order:
+Todos are saved after every change. By default, the data directory is `$XDG_CONFIG_HOME/ts` when `XDG_CONFIG_HOME` is set, or `~/.config/ts` otherwise. Set `TS_DATA_DIR` to use another directory.
 
-1. `TS_DATA_FILE`, when set to a nonempty path
-2. `$XDG_CONFIG_HOME/ts/todos.json`, when `XDG_CONFIG_HOME` is set
-3. `~/.config/ts/todos.json`
+Each day is stored in a separate TOML file. The subdirectory name is the first 16 hexadecimal characters of the SHA-256 hash of `YYYY-MM`, and the file name is the same 16-character hash of `YYYY-MM-DD` plus `.toml`. For example:
 
-When using the default location, existing data is automatically migrated from `$XDG_DATA_HOME/ts/todos.json` or `~/.local/share/ts/todos.json` if the new file does not exist. Setting `TS_DATA_FILE` disables legacy migration.
+```text
+~/.config/ts/
+├── metadata.toml
+└── 05e01bd602cd4d89/
+    ├── a433c8ba83101c75.toml
+    └── 059da136dbf487af.toml
+```
 
-The JSON file contains a monotonically increasing `next_id` and a date-keyed map of todos. Each todo records its ID, title, priority, completion state, creation timestamp, and details. There is no network service or cloud synchronization.
+`metadata.toml` stores the globally monotonically increasing `next_id`. Each daily file contains its ISO date and todos; every todo records its ID, title, priority, completion state, creation timestamp, and details. Daily files and metadata use atomic replacement, and changing one day does not rewrite other days.
 
-To use an isolated data file while developing or testing:
+On startup, if `metadata.toml` does not exist, existing data is imported from the first available legacy file: `todos.json` in the data directory, `$XDG_DATA_HOME/ts/todos.json`, or `~/.local/share/ts/todos.json`. The legacy JSON file is retained after a successful import.
+
+For backward compatibility, setting `TS_DATA_FILE` selects the original single-file JSON mode and disables daily TOML storage and automatic migration. For isolated daily storage while developing or testing, use `TS_DATA_DIR` instead:
 
 ```sh
-TS_DATA_FILE=/tmp/ts-todos.json cargo run --locked
+TS_DATA_DIR=/tmp/ts-todos cargo run --locked
 ```
 
 ## Development

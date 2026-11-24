@@ -2,7 +2,7 @@
 
 ## Overview
 
-`ts` is a single-binary, interactive terminal todo application written in Rust. It uses the Rust 2024 edition and organizes todos by calendar date. The application is entirely local: it has no server, network protocol, database, or external service. Its user interface runs in the terminal's alternate screen and its data is persisted as JSON.
+`ts` is a single-binary, interactive terminal todo application written in Rust. It uses the Rust 2024 edition and organizes todos by calendar date. The application is entirely local: it has no server, network protocol, database, or external service. Its user interface runs in the terminal's alternate screen and each day's data is persisted as TOML.
 
 The package and binary are both named `ts`. User-facing documentation is in `README.md`; this file describes the implementation and the constraints to preserve when changing it.
 
@@ -21,7 +21,7 @@ The package and binary are both named `ts`. User-facing documentation is in `REA
 │   ├── main.rs         CLI handling, terminal setup, event loop, and cleanup
 │   ├── app.rs          Application state, modes, keyboard handling, and commands
 │   ├── model.rs        Serializable data model and todo operations
-│   ├── storage.rs      Data-file resolution, loading, migration, and atomic saving
+│   ├── storage.rs      Data-location resolution, daily TOML loading/saving, and JSON migration
 │   └── ui.rs           ratatui rendering for the main view and modal dialogs
 └── target/             Generated Cargo artifacts; never edit or commit these
 ```
@@ -34,8 +34,8 @@ There is no separate library target. Modules are private to the binary crate and
 
 This is the process entry point and terminal lifecycle owner.
 
-- `handle_arguments` implements `-h`/`--help` and `-V`/`--version`. Any other argument is an error; the interactive UI takes no positional arguments.
-- `main` resolves the data path, loads the store, constructs `App` with the current local date, and enters the terminal session.
+- `handle_arguments` implements `-h`/`--help`, `-V`/`--version`, and `--list`. Any other argument is an error; the interactive UI takes no positional arguments.
+- `main` resolves the data location, loads the store, and either prints all incomplete todos for `--list` or constructs `App` with the current local date and enters the terminal session.
 - `TerminalSession` enables raw mode, enters the alternate screen, hides the cursor, and owns the ratatui terminal backed by crossterm.
 - The run loop draws the current state, waits for a key event, forwards key presses and repeats to `App::handle_key`, and exits when `App::should_quit` is set.
 - `TerminalSession::drop` restores raw mode, cursor visibility, and the normal screen. Preserve this cleanup behavior when changing startup or event-loop code so errors do not leave the terminal corrupted.
@@ -53,7 +53,7 @@ This module contains interaction logic and mutable application state.
 - The current modal `Mode`
 - An optional status or error message
 - The quit flag
-- The private data-file path used for persistence
+- The private `DataLocation` used for persistence
 
 `Mode` defines five interaction states:
 
@@ -63,7 +63,7 @@ This module contains interaction logic and mutable application state.
 - `Details(DetailsForm)`: multiline details editing and scrolling
 - `Deleting(u64)`: confirmation for one todo
 
-`App::handle_key` handles global `Ctrl+C`, clears the previous status, and dispatches according to a clone of the current mode. Individual handlers update state and call storage only after persistent changes. Navigation and selection alone do not write the file.
+`App::handle_key` handles global `Ctrl+C`, clears the previous status, and dispatches according to a clone of the current mode. Individual handlers update state and call storage only after persistent changes. Navigation and selection alone do not write files.
 
 The model is intentionally manipulated through `Store` methods rather than by duplicating todo mutation rules in event handlers. Selection is tracked by stable todo ID because changing priority or completion can reorder the visible list. Date helpers use checked arithmetic, and month navigation clamps the day to the target month's length.
 
@@ -84,19 +84,22 @@ Keep serialization compatibility in mind: renaming fields or changing enum repre
 
 ### `src/storage.rs`
 
-This module owns all filesystem interaction for todo data.
+This module owns all filesystem interaction for todo data. `DataLocation` distinguishes the default daily TOML directory from the backward-compatible single JSON file selected by `TS_DATA_FILE`.
 
-Path precedence is:
+Location precedence is:
 
-1. Nonempty `TS_DATA_FILE`
-2. Nonempty `XDG_CONFIG_HOME`, plus `ts/todos.json`
-3. Nonempty `HOME`, plus `.config/ts/todos.json`
+1. Nonempty `TS_DATA_FILE`, selecting legacy single-file JSON mode
+2. Nonempty `TS_DATA_DIR`, selecting a daily TOML directory
+3. Nonempty `XDG_CONFIG_HOME`, plus `ts`
+4. Nonempty `HOME`, plus `.config/ts`
 
-If none is available, startup fails with an actionable error. When using the normal config location and the file is absent, `load_legacy` looks under `XDG_DATA_HOME/ts/todos.json` or `HOME/.local/share/ts/todos.json`. A successfully decoded legacy store is immediately saved to the new location. An explicit `TS_DATA_FILE` disables migration.
+If none is available, startup fails with an actionable error. In daily mode, `metadata.toml` stores `next_id`. Each day is stored under a subdirectory named with the first 16 hexadecimal characters of the SHA-256 hash of `YYYY-MM`; the file is the equivalent hash of `YYYY-MM-DD` plus `.toml`. Every daily file includes its plain ISO date so loading can reconstruct and validate the `Store`.
 
-`save` creates parent directories, serializes pretty JSON, writes and syncs a temporary sibling file named with the process ID, and renames it over the destination. Failed saves attempt to remove the temporary file. Preserve atomic replacement and path-specific error context when changing persistence code.
+When `metadata.toml` is absent, migration checks `todos.json` in the daily data directory, then `XDG_DATA_HOME/ts/todos.json` or `HOME/.local/share/ts/todos.json`. A successfully decoded legacy store is saved as daily TOML before its metadata. Legacy files are retained. An explicit `TS_DATA_FILE` disables migration and continues to use JSON.
 
-Loading normalizes `next_id`; saving itself does not mutate the store. Corrupt JSON is reported rather than silently replaced.
+`save_day` writes only the changed day and metadata in daily mode, removing the daily file when its final todo is deleted. Writes create parent directories, serialize pretty TOML or JSON, write and sync a temporary sibling file named with the process ID, and rename it over the destination. Failed saves attempt to remove the temporary file. Preserve atomic replacement and path-specific error context when changing persistence code.
+
+Loading normalizes `next_id`; saving itself does not mutate the store. Corrupt TOML or JSON is reported rather than silently replaced.
 
 ### `src/ui.rs`
 
@@ -106,6 +109,7 @@ This is the rendering layer. It reads `App` and its mode but does not mutate app
 - The header shows the selected date and active/completed counts.
 - The todo list displays selection, checkbox, priority, title, and creation time when width permits.
 - Modal renderers cover the calendar, add/edit form, details editor, and deletion confirmation.
+- Calendar dates without todos are dark gray, dates with todos are white, and today has an orange background. Highlighted dates retain a contrasting selection background.
 - `unicode-width` helpers truncate titles by terminal cell width rather than byte count or character count.
 
 Keep rendering side-effect free. Use ratatui layout constraints rather than terminal-size assumptions, retain popup bounds clamping, and account for wide Unicode characters when calculating visible widths. Any new mode requires a corresponding rendering branch.
@@ -119,42 +123,42 @@ The Bash installer resolves its own project directory, runs `cargo build --relea
 Startup follows this path:
 
 ```text
-CLI arguments → data_file() → load()/legacy migration → App::new()
-             → TerminalSession::new() → draw/event loop
+CLI arguments → data_location() → load()/legacy migration
+             → --list output, or App::new() → TerminalSession::new() → draw/event loop
 ```
 
 A typical persistent command follows this path:
 
 ```text
-crossterm key event → App mode handler → Store mutation → storage::save()
+crossterm key event → App mode handler → Store mutation → storage::save_day()
                    → status/selection update → ui::draw()
 ```
 
 The UI is redrawn before each blocking event read. There are no background jobs or asynchronous tasks. Errors from loading and saving propagate through `anyhow::Result`; terminal restoration is handled by `Drop`.
 
-## JSON persistence contract
+## Persistence contract
 
-The top-level shape is:
+`metadata.toml` contains:
 
-```json
-{
-  "next_id": 2,
-  "days": {
-    "2026-01-31": [
-      {
-        "id": 1,
-        "title": "Example",
-        "priority": "medium",
-        "completed": false,
-        "created_at": "2026-01-31T12:00:00+08:00",
-        "details": ""
-      }
-    ]
-  }
-}
+```toml
+next_id = 2
 ```
 
-Dates use `YYYY-MM-DD`; timestamps use chrono's serde representation with a fixed UTC offset. Missing optional-in-practice fields are handled by the defaults declared in `model.rs`. Treat the data file as user data: never silently discard it to recover from a parse or write error.
+Each hashed daily file contains its unhashed date and an array of todos:
+
+```toml
+date = "2026-01-31"
+
+[[todos]]
+id = 1
+title = "Example"
+priority = "medium"
+completed = false
+created_at = "2026-01-31T12:00:00+08:00"
+details = ""
+```
+
+Dates use `YYYY-MM-DD`; timestamps use chrono's serde representation with a fixed UTC offset. Missing optional-in-practice fields are handled by the defaults declared in `model.rs`. The legacy JSON shape retains `next_id` and a date-keyed `days` map containing the same todo fields. Treat all data files as user data: never silently discard them to recover from a parse or write error.
 
 ## Dependencies
 
@@ -162,7 +166,9 @@ Dates use `YYYY-MM-DD`; timestamps use chrono's serde representation with a fixe
 - `chrono`: local dates, timestamps, and calendar arithmetic; serde support enabled
 - `crossterm`: keyboard events and terminal control
 - `ratatui`: terminal widgets and rendering
-- `serde` / `serde_json`: data serialization
+- `serde` / `serde_json`: data serialization and legacy JSON compatibility
+- `sha2`: SHA-256-based month and day path names
+- `toml`: daily files and metadata serialization
 - `unicode-width`: display-cell-aware text layout
 
 Use the versions and idioms already recorded in `Cargo.toml` and `Cargo.lock`. Avoid adding a dependency for functionality that the standard library or current dependencies already provide.
@@ -178,7 +184,7 @@ The release profile enables LTO, uses one codegen unit, and strips symbols. Deve
 - Keep user-facing key documentation consistent across the footer, modal help, `ts --help`, and `README.md`.
 - Preserve backward compatibility for existing JSON and legacy-path migration unless an explicit migration design replaces it.
 - Use `anyhow` context for I/O failures so the affected path is visible.
-- Do not write to real user data during manual verification. Set `TS_DATA_FILE` to a temporary path.
+- Do not write to real user data during manual verification. Set `TS_DATA_DIR` to a temporary path, or use `TS_DATA_FILE` when specifically verifying legacy JSON mode.
 - Update this file when module responsibilities, repository structure, storage behavior, or development workflows change.
 
 ## Verification
@@ -192,10 +198,10 @@ cargo test --locked
 cargo clippy --locked -- -D warnings
 ```
 
-For interactive changes, also run the real binary against an isolated file and exercise the affected mode end to end:
+For interactive changes, also run the real binary against an isolated directory and exercise the affected mode end to end:
 
 ```sh
-TS_DATA_FILE=/tmp/ts-agent-todos.json cargo run --locked
+TS_DATA_DIR=/tmp/ts-agent-todos cargo run --locked
 ```
 
 Verify terminal restoration after both normal quit and error paths where practical. For installation changes, test `install.sh` with a destination inside an existing temporary directory rather than the system default.

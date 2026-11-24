@@ -17,28 +17,59 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 fn main() -> Result<()> {
-    if handle_arguments()? {
+    let command = match handle_arguments()? {
+        Some(command) => command,
+        None => return Ok(()),
+    };
+
+    let data_location = storage::data_location()?;
+    let store = storage::load(&data_location)?;
+    if command == Command::List {
+        print_incomplete(&store);
         return Ok(());
     }
 
-    let data_path = storage::data_file()?;
-    let store = storage::load(&data_path)?;
-    let mut app = App::new(store, data_path, Local::now().date_naive());
+    let mut app = App::new(store, data_location, Local::now().date_naive());
     let mut terminal = TerminalSession::new()?;
     terminal.run(&mut app)
 }
 
-fn handle_arguments() -> Result<bool> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Command {
+    Interactive,
+    List,
+}
+
+fn print_incomplete(store: &model::Store) {
+    let mut found = false;
+    for date in store.days.keys().copied() {
+        for todo in store
+            .todos_on(date)
+            .into_iter()
+            .filter(|todo| !todo.completed)
+        {
+            println!("{date} [{:<6}] {}", todo.priority.label(), todo.title);
+            found = true;
+        }
+    }
+    if !found {
+        println!("No incomplete todos.");
+    }
+}
+
+fn handle_arguments() -> Result<Option<Command>> {
     let mut arguments = env::args_os().skip(1);
     let Some(argument) = arguments.next() else {
-        return Ok(false);
+        return Ok(Some(Command::Interactive));
     };
 
     match argument.to_str() {
         Some("-h" | "--help") => {
             println!(
                 "ts — interactive daily todos\n\n\
-                 Usage: ts\n\n\
+                 Usage:\n\
+                   ts          Open the interactive interface\n\
+                   ts --list   List all incomplete todos\n\n\
                  The current date is selected on startup. Todos are saved after every change.\n\n\
                  Keys:\n\
                    ↑/↓ or J/K    Select a todo\n\
@@ -53,16 +84,19 @@ fn handle_arguments() -> Result<bool> {
                    X             Delete the selected todo\n\
                    Q or Esc      Quit\n\n\
                  Data location:\n\
-                   $XDG_CONFIG_HOME/ts/todos.json, or ~/.config/ts/todos.json\n\
-                   Existing data is migrated from the previous data directory.\n\
-                   Set TS_DATA_FILE to use a different file."
+                   $XDG_CONFIG_HOME/ts, or ~/.config/ts\n\
+                   Each date is stored as TOML under hashed month/day names.\n\
+                   Existing JSON data is migrated without deleting the old file.\n\
+                   Set TS_DATA_DIR to use a different directory.\n\
+                   TS_DATA_FILE retains the legacy single-file JSON mode."
             );
-            Ok(true)
+            Ok(None)
         }
         Some("-V" | "--version") => {
             println!("ts {}", env!("CARGO_PKG_VERSION"));
-            Ok(true)
+            Ok(None)
         }
+        Some("--list") => Ok(Some(Command::List)),
         _ => {
             bail!(
                 "Unknown argument: {}\nTry 'ts --help' for usage.",

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -69,11 +67,15 @@ pub struct App {
     pub mode: Mode,
     pub status: Option<StatusMessage>,
     pub should_quit: bool,
-    data_path: PathBuf,
+    data_location: storage::DataLocation,
 }
 
 impl App {
-    pub fn new(store: Store, data_path: PathBuf, selected_date: NaiveDate) -> Self {
+    pub fn new(
+        store: Store,
+        data_location: storage::DataLocation,
+        selected_date: NaiveDate,
+    ) -> Self {
         let selected_id = store.todos_on(selected_date).first().map(|todo| todo.id);
         Self {
             store,
@@ -82,7 +84,7 @@ impl App {
             mode: Mode::Normal,
             status: None,
             should_quit: false,
-            data_path,
+            data_location,
         }
     }
 
@@ -204,7 +206,7 @@ impl App {
                         let id = self.store.add(self.selected_date, title, form.priority);
                         (id, "Todo added.")
                     };
-                    storage::save(&self.data_path, &self.store)?;
+                    storage::save_day(&self.data_location, &self.store, self.selected_date)?;
                     self.selected_id = Some(id);
                     self.mode = Mode::Normal;
                     self.status = Some(StatusMessage {
@@ -309,7 +311,7 @@ impl App {
             KeyCode::Char('y' | 'Y') => {
                 let previous_index = self.selected_index().unwrap_or(0);
                 if self.store.delete(self.selected_date, id).is_some() {
-                    storage::save(&self.data_path, &self.store)?;
+                    storage::save_day(&self.data_location, &self.store, self.selected_date)?;
                     let todos = self.todos();
                     self.selected_id = if todos.is_empty() {
                         None
@@ -392,7 +394,7 @@ impl App {
     }
 
     fn persist(&self) -> Result<()> {
-        storage::save(&self.data_path, &self.store)
+        storage::save_day(&self.data_location, &self.store, self.selected_date)
     }
 
     fn valid_selected_id(&self) -> Option<u64> {

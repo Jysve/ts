@@ -9,7 +9,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{AddField, AddForm, App, CalendarState, DetailsForm, Mode},
+    app::{AddField, AddForm, App, CalendarState, DependencyForm, DetailsForm, Mode},
     model::Priority,
 };
 
@@ -32,6 +32,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Calendar(calendar) => draw_calendar(frame, app, *calendar),
         Mode::Adding(form) => draw_add_form(frame, form),
         Mode::Details(form) => draw_details(frame, app, form),
+        Mode::Dependencies(form) => draw_dependencies(frame, app, form),
         Mode::Deleting(id) => draw_delete_confirmation(frame, app, *id),
     }
 }
@@ -115,7 +116,7 @@ fn draw_todos(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    const PREFIX_WIDTH: usize = 14;
+    const PREFIX_WIDTH: usize = 18;
     let content_width = usize::from(area.width.saturating_sub(2));
     let selected_index = app.selected_index();
     let items: Vec<ListItem> = todos
@@ -153,6 +154,12 @@ fn draw_todos(frame: &mut Frame, app: &App, area: Rect) {
             };
             let title = truncate_to_width(&todo.title, title_width);
             let padding = title_width.saturating_sub(title.width());
+            let has_prerequisites = !todo.prerequisites.is_empty();
+            let prerequisite_style = if app.store.blocked_by(todo.id).is_empty() {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
             let mut spans = vec![
                 Span::styled(
                     if selected { "›" } else { " " },
@@ -164,6 +171,10 @@ fn draw_todos(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     format!(" {:^6} ", todo.priority.label()),
                     priority_style(todo.priority),
+                ),
+                Span::styled(
+                    if has_prerequisites { " ↳ " } else { "    " },
+                    prerequisite_style,
                 ),
                 Span::raw(" "),
                 Span::styled(title, title_style),
@@ -206,7 +217,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             },
         ),
         None => (
-            "Use ↑/↓ to select a todo.".to_owned(),
+            "Use U/E or ↑/↓ to select a todo.".to_owned(),
             Style::default().fg(Color::DarkGray),
         ),
     };
@@ -216,22 +227,22 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(frame: &mut Frame, area: Rect) {
     let rows = vec![
         Row::new(vec![
-            shortcut("A/N", "Add"),
+            shortcut("A", "Add"),
             shortcut("Space/Enter", "Toggle"),
-            shortcut("E", "Edit"),
-            shortcut("D", "Details"),
+            shortcut("R", "Edit"),
+            shortcut("S", "Details"),
         ]),
         Row::new(vec![
-            shortcut("↑/↓", "Select"),
-            shortcut("←/→", "Day"),
+            shortcut("U/E or ↑/↓", "Select"),
+            shortcut("N/I or ←/→", "Day"),
             shortcut("C", "Calendar"),
             shortcut("T", "Today"),
         ]),
         Row::new(vec![
-            shortcut("1/2/3", "Priority"),
+            shortcut("1-4", "Priority"),
+            shortcut("D", "Prereqs"),
             shortcut("X", "Delete"),
             shortcut("Q", "Quit"),
-            Line::default(),
         ]),
     ];
     let footer = Table::new(rows, [Constraint::Ratio(1, 4); 4])
@@ -330,7 +341,7 @@ fn draw_calendar(frame: &mut Frame, app: &App, calendar: CalendarState) {
 
     lines.push(Line::from(""));
     lines.push(
-        Line::from("Arrows: day/week   PgUp/PgDn: month")
+        Line::from("N/I: day  U/E: week  PgUp/PgDn: month")
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray)),
     );
@@ -439,7 +450,7 @@ fn draw_add_form(frame: &mut Frame, form: &AddForm) {
     }
 
     let help = Paragraph::new(vec![
-        Line::from("Tab: switch field   ←/→: change focused priority"),
+        Line::from("Tab: switch field   N/I or ←/→: change priority"),
         Line::from("Enter: save   Esc: cancel"),
     ])
     .alignment(Alignment::Center)
@@ -451,7 +462,7 @@ fn draw_details(frame: &mut Frame, app: &App, form: &DetailsForm) {
     let Some(todo) = app.todo_by_id(form.todo_id) else {
         return;
     };
-    let area = centered_rect(78, 20, frame.area());
+    let area = centered_rect(78, 21, frame.area());
     let block = Block::default()
         .title(" Todo details ")
         .title_style(
@@ -467,6 +478,7 @@ fn draw_details(frame: &mut Frame, app: &App, form: &DetailsForm) {
 
     let chunks = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(4),
@@ -505,6 +517,30 @@ fn draw_details(frame: &mut Frame, app: &App, form: &DetailsForm) {
         ])),
         chunks[2],
     );
+    let prerequisites = if todo.prerequisites.is_empty() {
+        "none".to_owned()
+    } else {
+        todo.prerequisites
+            .iter()
+            .map(|id| match app.store.todo(*id) {
+                Some(prerequisite) => format!(
+                    "#{} {}{}",
+                    id,
+                    prerequisite.title,
+                    if prerequisite.completed { " ✓" } else { "" }
+                ),
+                None => format!("#{id} (missing)"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Prerequisites: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(prerequisites, Style::default().fg(Color::Gray)),
+        ])),
+        chunks[3],
+    );
 
     let details = Paragraph::new(format!("{}█", form.details))
         .style(Style::default().fg(Color::White))
@@ -516,7 +552,7 @@ fn draw_details(frame: &mut Frame, app: &App, form: &DetailsForm) {
         )
         .wrap(Wrap { trim: false })
         .scroll((form.scroll, 0));
-    frame.render_widget(details, chunks[3]);
+    frame.render_widget(details, chunks[4]);
 
     let help = Paragraph::new(vec![
         Line::from("Enter: new line   Tab: indent   ↑/↓: scroll"),
@@ -524,7 +560,140 @@ fn draw_details(frame: &mut Frame, app: &App, form: &DetailsForm) {
     ])
     .alignment(Alignment::Center)
     .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(help, chunks[4]);
+    frame.render_widget(help, chunks[5]);
+}
+
+fn draw_dependencies(frame: &mut Frame, app: &App, form: &DependencyForm) {
+    let Some(todo) = app.todo_by_id(form.todo_id) else {
+        return;
+    };
+    let area = centered_rect(84, 22, frame.area());
+    let block = Block::default()
+        .title(" Prerequisites ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(todo.title.clone())
+            .style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+
+    let candidates = app.dependency_candidates(form.todo_id);
+    if candidates.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No other todos available.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray)),
+            chunks[1],
+        );
+    } else {
+        let selected_index = form
+            .selected_id
+            .and_then(|id| {
+                candidates
+                    .iter()
+                    .position(|(_, candidate)| candidate.id == id)
+            })
+            .or(Some(0));
+        let items: Vec<ListItem> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, (date, candidate))| {
+                let selected = selected_index == Some(index);
+                let linked = todo.prerequisites.contains(&candidate.id);
+                let relation_style = if linked {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let completion_style = if candidate.completed {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        if selected { "› " } else { "  " },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(if linked { "[x] " } else { "[ ] " }, relation_style),
+                    Span::styled(
+                        if candidate.completed {
+                            "[✓] "
+                        } else {
+                            "[ ] "
+                        },
+                        completion_style,
+                    ),
+                    Span::styled(
+                        format!("{date} #{:<4} ", candidate.id),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        candidate.title.clone(),
+                        if candidate.completed {
+                            Style::default()
+                                .fg(Color::Gray)
+                                .add_modifier(Modifier::CROSSED_OUT)
+                        } else {
+                            Style::default().fg(Color::White)
+                        },
+                    ),
+                ]))
+                .style(if selected {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                })
+            })
+            .collect();
+        let list = List::new(items).highlight_style(Style::default());
+        let mut state = ListState::default().with_selected(selected_index);
+        frame.render_stateful_widget(list, chunks[1], &mut state);
+    }
+
+    let message = form
+        .error
+        .as_deref()
+        .unwrap_or("[x] prerequisite   [✓] completed");
+    frame.render_widget(
+        Paragraph::new(message).style(Style::default().fg(if form.error.is_some() {
+            Color::Red
+        } else {
+            Color::DarkGray
+        })),
+        chunks[2],
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("U/E or ↑/↓: select   Space/Enter: add/remove"),
+            Line::from("Esc: close"),
+        ])
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        chunks[3],
+    );
 }
 
 fn draw_delete_confirmation(frame: &mut Frame, app: &App, id: u64) {
@@ -559,6 +728,7 @@ fn priority_style(priority: Priority) -> Style {
     match priority {
         Priority::High => style.bg(Color::Red),
         Priority::Medium => style.bg(Color::Yellow),
+        Priority::Normal => style.bg(Color::Green),
         Priority::Low => style.bg(Color::Cyan),
     }
 }

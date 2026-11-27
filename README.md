@@ -5,8 +5,10 @@
 ## Features
 
 - Daily todo lists with previous/next-day navigation and a calendar picker
-- High, medium, and low priorities, with priority-ordered lists
+- High, medium, normal, and low priorities, with priority-ordered lists
+- Colemak-DH home-row controls, while retaining arrow-key navigation
 - Completion toggles, title editing, and multiline details
+- Cross-date prerequisite links with cycle detection and completion blocking
 - Automatic persistence after every change
 - Atomic per-day TOML writes and automatic migration from legacy JSON data
 - A non-interactive `ts --list` command for all incomplete todos
@@ -71,26 +73,29 @@ Each line has the form `YYYY-MM-DD [Priority] Title`. Completed todos are omitte
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` or `k` / `j` | Select a todo |
-| `Left` / `Right` | Go to the previous or next date |
+| `u` / `e` or `Up` / `Down` | Select the previous or next todo |
+| `n` / `i` or `Left` / `Right` | Go to the previous or next date |
+| `a` | Add a todo |
+| `r` | Edit the selected todo's title and priority |
+| `s` | Open and edit the selected todo's details |
+| `d` | Manage the selected todo's prerequisites |
 | `t` | Go to today |
 | `c` | Open the calendar |
-| `a` or `n` | Add a todo |
-| `e` | Edit the selected todo's title and priority |
-| `d` | Open and edit the selected todo's details |
 | `Space` or `Enter` | Toggle completion |
-| `1` / `2` / `3` | Set high, medium, or low priority |
+| `1` / `2` / `3` / `4` | Set high, medium, normal, or low priority |
 | `x` | Delete the selected todo after confirmation |
 | `q` or `Esc` | Quit |
 
-`Ctrl+C` also quits the application.
+`Ctrl+C` also quits the application. The layout keeps the common add, edit, details, and today actions on Colemak-DH's `a`, `r`, `s`, and `t` keys. A `↳` marker indicates a todo with prerequisites: yellow means at least one prerequisite is unfinished or missing, and green means all prerequisites are complete.
+
+A todo cannot be completed until every prerequisite is complete. Marking an already completed todo as active remains allowed. A todo that is referenced as a prerequisite cannot be deleted until those references are removed.
 
 ### Add and edit form
 
 | Key | Action |
 | --- | --- |
 | `Tab`, `Shift+Tab`, `Up`, or `Down` | Switch between title and priority |
-| `Left` / `Right` | Change priority when the priority field is focused |
+| `n` / `i` or `Left` / `Right` | Change priority when the priority field is focused |
 | `Enter` | Save |
 | `Esc` | Cancel |
 
@@ -105,11 +110,22 @@ Each line has the form `YYYY-MM-DD [Priority] Title`. Completed todos are omitte
 | `Ctrl+S` | Save and close |
 | `Esc` | Cancel without saving |
 
+### Prerequisites
+
+| Key | Action |
+| --- | --- |
+| `u` / `e` or `Up` / `Down` | Select another todo, including todos on other dates |
+| `Space` or `Enter` | Add or remove it as a prerequisite |
+| `Esc` | Close the prerequisite manager |
+
+The first checkbox shows whether the candidate is a prerequisite; the second shows its completion state. Self-references and direct or indirect dependency cycles are rejected. Changes are saved immediately.
+
 ### Calendar
 
 | Key | Action |
 | --- | --- |
-| Arrow keys | Move by one day or one week |
+| `n` / `i` or `Left` / `Right` | Move by one day |
+| `u` / `e` or `Up` / `Down` | Move by one week |
 | `PageUp` / `PageDown` | Move by one month |
 | `t` | Highlight today |
 | `Enter` | Select the highlighted date |
@@ -131,7 +147,9 @@ Each day is stored in a separate TOML file. The subdirectory name is the first 1
     └── 059da136dbf487af.toml
 ```
 
-`metadata.toml` stores the globally monotonically increasing `next_id`. Each daily file contains its ISO date and todos; every todo records its ID, title, priority, completion state, creation timestamp, and details. Daily files and metadata use atomic replacement, and changing one day does not rewrite other days.
+`metadata.toml` stores the globally monotonically increasing `next_id`. Each daily file contains its ISO date and todos; every todo records its ID, title, priority, completion state, creation timestamp, details, and optional prerequisite ID list. Priorities are serialized as `high`, `medium`, `normal`, or `low`; prerequisite IDs can refer to todos on any date. Empty prerequisite lists are omitted. Existing TOML and JSON files without a prerequisite field load with an empty list, and older files without a priority retain the default `medium` priority.
+
+Daily files and metadata use atomic replacement, and changing one day does not rewrite other days.
 
 On startup, if `metadata.toml` does not exist, existing data is imported from the first available legacy file: `todos.json` in the data directory, `$XDG_DATA_HOME/ts/todos.json`, or `~/.local/share/ts/todos.json`. The legacy JSON file is retained after a successful import.
 

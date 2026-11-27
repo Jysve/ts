@@ -71,14 +71,15 @@ fn handle_arguments() -> Result<Option<Command>> {
                    ts          Open the interactive interface\n\
                    ts --list   List all incomplete todos\n\n\
                  The current date is selected on startup. Todos are saved after every change.\n\n\
-                 Keys:\n\
-                   ↑/↓ or J/K    Select a todo\n\
-                   A or N        Add a todo and choose its priority\n\
-                   Space/Enter   Toggle completion\n\
-                   E             Edit the selected todo\n\
-                   D             Open and edit details (Ctrl+S saves)\n\
-                   1/2/3         Set High/Medium/Low priority\n\
-                   ←/→           Previous/next date\n\
+                 Keys (Colemak-DH):\n\
+                   U/E or ↑/↓    Select a todo\n\
+                   N/I or ←/→    Previous/next date\n\
+                   A             Add a todo and choose its priority\n\
+                   R             Edit the selected todo\n\
+                   S             Open and edit details (Ctrl+S saves)\n\
+                   D             Manage prerequisites\n\
+                   Space/Enter   Toggle completion (blocked by active prerequisites)\n\
+                   1/2/3/4       Set High/Medium/Normal/Low priority\n\
                    C             Open the calendar\n\
                    T             Go to today\n\
                    X             Delete the selected todo\n\

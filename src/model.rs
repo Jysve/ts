@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, FixedOffset, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -9,16 +9,18 @@ pub enum Priority {
     High,
     #[default]
     Medium,
+    Normal,
     Low,
 }
 
 impl Priority {
-    pub const ALL: [Self; 3] = [Self::High, Self::Medium, Self::Low];
+    pub const ALL: [Self; 4] = [Self::High, Self::Medium, Self::Normal, Self::Low];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::High => "High",
             Self::Medium => "Medium",
+            Self::Normal => "Normal",
             Self::Low => "Low",
         }
     }
@@ -27,7 +29,8 @@ impl Priority {
         match self {
             Self::High => 0,
             Self::Medium => 1,
-            Self::Low => 2,
+            Self::Normal => 2,
+            Self::Low => 3,
         }
     }
 
@@ -50,6 +53,15 @@ pub struct Todo {
     pub created_at: DateTime<FixedOffset>,
     #[serde(default)]
     pub details: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DependencyError {
+    SameTodo,
+    NotFound,
+    Cycle,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,6 +104,21 @@ impl Store {
         self.days.get(&date)?.iter().find(|todo| todo.id == id)
     }
 
+    pub fn todo(&self, id: u64) -> Option<&Todo> {
+        self.days.values().flatten().find(|todo| todo.id == id)
+    }
+
+    pub fn all_todos(&self) -> Vec<(NaiveDate, &Todo)> {
+        self.days
+            .keys()
+            .flat_map(|date| {
+                self.todos_on(*date)
+                    .into_iter()
+                    .map(move |todo| (*date, todo))
+            })
+            .collect()
+    }
+
     pub fn add(&mut self, date: NaiveDate, title: String, priority: Priority) -> u64 {
         let id = self.next_id.max(1);
         self.next_id = id.saturating_add(1);
@@ -102,6 +129,7 @@ impl Store {
             completed: false,
             created_at: created_now(),
             details: String::new(),
+            prerequisites: Vec::new(),
         });
         id
     }
@@ -125,10 +153,76 @@ impl Store {
         }
     }
 
-    pub fn toggle(&mut self, date: NaiveDate, id: u64) -> Option<bool> {
-        let todo = self.todo_mut(date, id)?;
+    pub fn toggle(&mut self, date: NaiveDate, id: u64) -> Result<Option<bool>, Vec<u64>> {
+        let Some(todo) = self.todo_on(date, id) else {
+            return Ok(None);
+        };
+        if !todo.completed {
+            let blocked_by = self.blocked_by(id);
+            if !blocked_by.is_empty() {
+                return Err(blocked_by);
+            }
+        }
+
+        let todo = self.todo_mut(date, id).expect("the todo was found above");
         todo.completed = !todo.completed;
-        Some(todo.completed)
+        Ok(Some(todo.completed))
+    }
+
+    pub fn blocked_by(&self, id: u64) -> Vec<u64> {
+        self.todo(id)
+            .into_iter()
+            .flat_map(|todo| &todo.prerequisites)
+            .copied()
+            .filter(|prerequisite_id| {
+                self.todo(*prerequisite_id)
+                    .is_none_or(|prerequisite| !prerequisite.completed)
+            })
+            .collect()
+    }
+
+    pub fn dependents(&self, id: u64) -> Vec<&Todo> {
+        self.days
+            .values()
+            .flatten()
+            .filter(|todo| todo.prerequisites.contains(&id))
+            .collect()
+    }
+
+    pub fn toggle_prerequisite(
+        &mut self,
+        date: NaiveDate,
+        id: u64,
+        prerequisite_id: u64,
+    ) -> Result<bool, DependencyError> {
+        if id == prerequisite_id {
+            return Err(DependencyError::SameTodo);
+        }
+        if self.todo_on(date, id).is_none() || self.todo(prerequisite_id).is_none() {
+            return Err(DependencyError::NotFound);
+        }
+
+        if self
+            .todo_on(date, id)
+            .expect("the todo was found above")
+            .prerequisites
+            .contains(&prerequisite_id)
+        {
+            self.todo_mut(date, id)
+                .expect("the todo was found above")
+                .prerequisites
+                .retain(|candidate| *candidate != prerequisite_id);
+            return Ok(false);
+        }
+
+        if self.creates_cycle(id, prerequisite_id) {
+            return Err(DependencyError::Cycle);
+        }
+        self.todo_mut(date, id)
+            .expect("the todo was found above")
+            .prerequisites
+            .push(prerequisite_id);
+        Ok(true)
     }
 
     pub fn set_priority(&mut self, date: NaiveDate, id: u64, priority: Priority) -> bool {
@@ -148,6 +242,23 @@ impl Store {
             self.days.remove(&date);
         }
         Some(removed)
+    }
+
+    fn creates_cycle(&self, id: u64, prerequisite_id: u64) -> bool {
+        let mut pending = vec![prerequisite_id];
+        let mut visited = HashSet::new();
+        while let Some(current_id) = pending.pop() {
+            if current_id == id {
+                return true;
+            }
+            if !visited.insert(current_id) {
+                continue;
+            }
+            if let Some(todo) = self.todo(current_id) {
+                pending.extend(todo.prerequisites.iter().copied());
+            }
+        }
+        false
     }
 
     fn todo_mut(&mut self, date: NaiveDate, id: u64) -> Option<&mut Todo> {

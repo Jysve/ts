@@ -3,7 +3,7 @@ use chrono::{Datelike, Duration, Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    model::{Priority, Store, Todo},
+    model::{DependencyError, Priority, Store, Todo},
     storage,
 };
 
@@ -13,6 +13,7 @@ pub enum Mode {
     Calendar(CalendarState),
     Adding(AddForm),
     Details(DetailsForm),
+    Dependencies(DependencyForm),
     Deleting(u64),
 }
 
@@ -53,6 +54,13 @@ pub struct DetailsForm {
     pub todo_id: u64,
     pub details: String,
     pub scroll: u16,
+}
+
+#[derive(Clone)]
+pub struct DependencyForm {
+    pub todo_id: u64,
+    pub selected_id: Option<u64>,
+    pub error: Option<String>,
 }
 
 pub struct StatusMessage {
@@ -116,6 +124,7 @@ impl App {
             Mode::Calendar(calendar) => self.handle_calendar(key, calendar),
             Mode::Adding(form) => self.handle_adding(key, form),
             Mode::Details(form) => self.handle_details(key, form),
+            Mode::Dependencies(form) => self.handle_dependencies(key, form),
             Mode::Deleting(id) => self.handle_deleting(key, id),
         }
     }
@@ -123,25 +132,27 @@ impl App {
     fn handle_normal(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q' | 'Q') => self.should_quit = true,
-            KeyCode::Up | KeyCode::Char('k') => self.select_relative(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.select_relative(1),
-            KeyCode::Left => self.change_date(-1),
-            KeyCode::Right => self.change_date(1),
+            KeyCode::Up | KeyCode::Char('u' | 'U') => self.select_relative(-1),
+            KeyCode::Down | KeyCode::Char('e' | 'E') => self.select_relative(1),
+            KeyCode::Left | KeyCode::Char('n' | 'N') => self.change_date(-1),
+            KeyCode::Right | KeyCode::Char('i' | 'I') => self.change_date(1),
             KeyCode::Char('t' | 'T') => self.go_to_today(),
             KeyCode::Char('c' | 'C') => {
                 self.mode = Mode::Calendar(CalendarState {
                     highlighted: self.selected_date,
                 });
             }
-            KeyCode::Char('a' | 'A' | 'n' | 'N') => {
+            KeyCode::Char('a' | 'A') => {
                 self.mode = Mode::Adding(AddForm::default());
             }
-            KeyCode::Char('e' | 'E') => self.edit_selected(),
-            KeyCode::Char('d' | 'D') => self.open_details(),
+            KeyCode::Char('r' | 'R') => self.edit_selected(),
+            KeyCode::Char('s' | 'S') => self.open_details(),
+            KeyCode::Char('d' | 'D') => self.open_dependencies(),
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected()?,
             KeyCode::Char('1') => self.set_selected_priority(Priority::High)?,
             KeyCode::Char('2') => self.set_selected_priority(Priority::Medium)?,
-            KeyCode::Char('3') => self.set_selected_priority(Priority::Low)?,
+            KeyCode::Char('3') => self.set_selected_priority(Priority::Normal)?,
+            KeyCode::Char('4') => self.set_selected_priority(Priority::Low)?,
             KeyCode::Char('x' | 'X') => {
                 if let Some(id) = self.valid_selected_id() {
                     self.mode = Mode::Deleting(id);
@@ -164,10 +175,18 @@ impl App {
                     is_error: false,
                 });
             }
-            KeyCode::Left => calendar.highlighted = shift_days(calendar.highlighted, -1),
-            KeyCode::Right => calendar.highlighted = shift_days(calendar.highlighted, 1),
-            KeyCode::Up => calendar.highlighted = shift_days(calendar.highlighted, -7),
-            KeyCode::Down => calendar.highlighted = shift_days(calendar.highlighted, 7),
+            KeyCode::Left | KeyCode::Char('n' | 'N') => {
+                calendar.highlighted = shift_days(calendar.highlighted, -1);
+            }
+            KeyCode::Right | KeyCode::Char('i' | 'I') => {
+                calendar.highlighted = shift_days(calendar.highlighted, 1);
+            }
+            KeyCode::Up | KeyCode::Char('u' | 'U') => {
+                calendar.highlighted = shift_days(calendar.highlighted, -7);
+            }
+            KeyCode::Down | KeyCode::Char('e' | 'E') => {
+                calendar.highlighted = shift_days(calendar.highlighted, 7);
+            }
             KeyCode::PageUp => calendar.highlighted = shift_months(calendar.highlighted, -1),
             KeyCode::PageDown => calendar.highlighted = shift_months(calendar.highlighted, 1),
             KeyCode::Char('t' | 'T') => calendar.highlighted = Local::now().date_naive(),
@@ -233,10 +252,10 @@ impl App {
                 form.title.pop();
                 form.error = None;
             }
-            KeyCode::Left if form.field == AddField::Priority => {
+            KeyCode::Left | KeyCode::Char('n' | 'N') if form.field == AddField::Priority => {
                 form.priority = form.priority.offset(-1);
             }
-            KeyCode::Right if form.field == AddField::Priority => {
+            KeyCode::Right | KeyCode::Char('i' | 'I') if form.field == AddField::Priority => {
                 form.priority = form.priority.offset(1);
             }
             KeyCode::Up | KeyCode::Down => {
@@ -244,6 +263,9 @@ impl App {
                     AddField::Title => AddField::Priority,
                     AddField::Priority => AddField::Title,
                 };
+            }
+            KeyCode::Char('u' | 'U' | 'e' | 'E') if form.field == AddField::Priority => {
+                form.field = AddField::Title;
             }
             _ => {}
         }
@@ -306,9 +328,70 @@ impl App {
         Ok(())
     }
 
+    fn handle_dependencies(&mut self, key: KeyEvent, mut form: DependencyForm) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return Ok(());
+            }
+            KeyCode::Up | KeyCode::Char('u' | 'U') => {
+                self.select_dependency(&mut form, -1);
+            }
+            KeyCode::Down | KeyCode::Char('e' | 'E') => {
+                self.select_dependency(&mut form, 1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let prerequisite_id = form.selected_id.filter(|selected_id| {
+                    self.dependency_candidates(form.todo_id)
+                        .into_iter()
+                        .any(|(_, todo)| todo.id == *selected_id)
+                });
+                if let Some(prerequisite_id) = prerequisite_id {
+                    match self.store.toggle_prerequisite(
+                        self.selected_date,
+                        form.todo_id,
+                        prerequisite_id,
+                    ) {
+                        Ok(_) => {
+                            self.persist()?;
+                            form.error = None;
+                        }
+                        Err(DependencyError::SameTodo) => {
+                            form.error = Some("A todo cannot depend on itself.".to_owned());
+                        }
+                        Err(DependencyError::NotFound) => {
+                            form.error = Some("The selected todo no longer exists.".to_owned());
+                        }
+                        Err(DependencyError::Cycle) => {
+                            form.error = Some(
+                                "This prerequisite would create a dependency cycle.".to_owned(),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        self.mode = Mode::Dependencies(form);
+        Ok(())
+    }
+
     fn handle_deleting(&mut self, key: KeyEvent, id: u64) -> Result<()> {
         match key.code {
             KeyCode::Char('y' | 'Y') => {
+                let dependents = self.store.dependents(id);
+                if !dependents.is_empty() {
+                    let references = self
+                        .format_todo_references(dependents.iter().map(|dependent| dependent.id));
+                    self.mode = Mode::Normal;
+                    self.status = Some(StatusMessage {
+                        text: format!("Cannot delete; required by {references}."),
+                        is_error: true,
+                    });
+                    return Ok(());
+                }
+
                 let previous_index = self.selected_index().unwrap_or(0);
                 if self.store.delete(self.selected_date, id).is_some() {
                     storage::save_day(&self.data_location, &self.store, self.selected_date)?;
@@ -359,23 +442,87 @@ impl App {
         }
     }
 
+    fn open_dependencies(&mut self) {
+        let Some(id) = self.valid_selected_id() else {
+            return;
+        };
+        let selected_id = self
+            .dependency_candidates(id)
+            .first()
+            .map(|(_, todo)| todo.id);
+        self.mode = Mode::Dependencies(DependencyForm {
+            todo_id: id,
+            selected_id,
+            error: None,
+        });
+    }
+
+    pub fn dependency_candidates(&self, todo_id: u64) -> Vec<(NaiveDate, &Todo)> {
+        self.store
+            .all_todos()
+            .into_iter()
+            .filter(|(_, todo)| todo.id != todo_id)
+            .collect()
+    }
+
+    fn select_dependency(&mut self, form: &mut DependencyForm, offset: isize) {
+        let candidates = self.dependency_candidates(form.todo_id);
+        if candidates.is_empty() {
+            form.selected_id = None;
+            return;
+        }
+        let current = form
+            .selected_id
+            .and_then(|id| candidates.iter().position(|(_, todo)| todo.id == id))
+            .unwrap_or(0);
+        let next = if offset.is_negative() {
+            current.saturating_sub(offset.unsigned_abs())
+        } else {
+            (current + offset.unsigned_abs()).min(candidates.len() - 1)
+        };
+        form.selected_id = Some(candidates[next].1.id);
+        form.error = None;
+    }
+
     fn toggle_selected(&mut self) -> Result<()> {
         let Some(id) = self.valid_selected_id() else {
             return Ok(());
         };
-        if let Some(completed) = self.store.toggle(self.selected_date, id) {
-            self.persist()?;
-            self.selected_id = Some(id);
-            self.status = Some(StatusMessage {
-                text: if completed {
-                    "Todo completed.".to_owned()
-                } else {
-                    "Todo marked as active.".to_owned()
-                },
-                is_error: false,
-            });
+        match self.store.toggle(self.selected_date, id) {
+            Ok(Some(completed)) => {
+                self.persist()?;
+                self.selected_id = Some(id);
+                self.status = Some(StatusMessage {
+                    text: if completed {
+                        "Todo completed.".to_owned()
+                    } else {
+                        "Todo marked as active.".to_owned()
+                    },
+                    is_error: false,
+                });
+            }
+            Ok(None) => {}
+            Err(blocked_by) => {
+                self.status = Some(StatusMessage {
+                    text: format!(
+                        "Complete or remove prerequisites first: {}.",
+                        self.format_todo_references(blocked_by)
+                    ),
+                    is_error: true,
+                });
+            }
         }
         Ok(())
+    }
+
+    fn format_todo_references(&self, ids: impl IntoIterator<Item = u64>) -> String {
+        ids.into_iter()
+            .map(|id| match self.store.todo(id) {
+                Some(todo) => format!("#{} {}", id, todo.title),
+                None => format!("#{id} (missing)"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn set_selected_priority(&mut self, priority: Priority) -> Result<()> {
